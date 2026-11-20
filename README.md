@@ -14,9 +14,10 @@ pilotée par **un seul script autonome** (`prometheus-bundle.sh`) dont toute la 
 | 02 | `./prometheus-bundle.sh 02 afficher` | Paramètres et seuils ; `02 definir SEUIL_DISQUE_WARN 75` réécrit le script et applique |
 | 03 | `sudo ./prometheus-bundle.sh 03 catalogue` | Agents et applications : installation locale, déploiement SSH, déclaration des cibles |
 | 04 | `sudo ./prometheus-bundle.sh 04 ajouter` | Canaux d'alerte : Teams, Slack, Telegram, e-mail, SMS, PagerDuty, Jira... |
-| 05 | `sudo ./prometheus-bundle.sh 05` | Grafana en français + tableau de bord « Supervision — Vue d'ensemble » |
+| 05 | `sudo ./prometheus-bundle.sh 05` | Grafana en français (sur cette machine ou une autre via `05 distant`) + vue d'ensemble + 19 tableaux par application |
 | 06 | `./prometheus-bundle.sh 06 etat` | Exploitation : état, alertes, maintenance (silences), journaux |
 | 07 | `sudo ./prometheus-bundle.sh 07 sauvegarder` | Sauvegarde, restauration, planification quotidienne |
+| 08 | `sudo ./prometheus-bundle.sh 08 mysql` | Test des alertes d'une application : vérifie que chaque règle peut se déclencher, puis envoie une alerte simulée vers les canaux |
 | 99 | `sudo ./prometheus-bundle.sh 99` | Nettoyage complet d'une installation précédente |
 
 Sans argument, le script ouvre un menu interactif. Aide d'une étape : `./prometheus-bundle.sh 03 aide`.
@@ -41,6 +42,13 @@ E-mail, Slack, Microsoft Teams, Telegram, Discord, Mattermost, Rocket.Chat, Webe
 SMS (Amazon SNS), Jira, webhook générique. Plusieurs canaux en parallèle, chacun avec son filtre de gravité
 (ex. Teams pour tout, SMS pour le critique).
 
+## Grafana et tableaux de bord
+
+- **Vue d'ensemble** : synthèse, alertes en cours, état de tous les services, serveurs, sites web.
+- **19 tableaux par application**, au choix (`05 tableaux`, `05 tableau mysql redis`, ou `05 tableau auto` pour toutes les applications supervisées).
+- **Tableaux communautaires** grafana.com importables par leur numéro (`05 importer 1860`) ou par fichier JSON.
+- Grafana **sur une autre machine** : `05 distant admin@grafana01` depuis le serveur Prometheus ; les commandes `05` suivantes y sont relayées.
+
 ## Exemple de mise en place
 
 ```bash
@@ -60,12 +68,16 @@ sudo ./prometheus-bundle.sh 04 ajouter teams equipe-exploitation
 ```
 
 ```bash
-sudo ./prometheus-bundle.sh 05
+sudo ./prometheus-bundle.sh 05 distant admin@grafana01
+```
+
+```bash
+sudo ./prometheus-bundle.sh 08 mysql
 ```
 
 ## Documentation
 
-- [Guide d'exploitation](docs/GUIDE_EXPLOITATION.md) : mise en service, ajout d'applications, alerting, réaction aux alertes, maintenance, sauvegarde, mises à jour, dépannage.
+- [Guide d'exploitation](docs/GUIDE_EXPLOITATION.md) : mise en service, ajout d'applications, alerting, Grafana local ou distant, tableaux par application, test des alertes, réaction aux alertes, maintenance, sauvegarde, mises à jour, dépannage.
 - [Règles d'alerte](docs/REGLES_ALERTE.md) : les 132 règles, application par application.
 - [packages/](packages/README.md) : installation hors-ligne.
 

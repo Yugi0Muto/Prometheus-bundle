@@ -16,9 +16,10 @@
 #    02  configuration  Paramètres et seuils : afficher / modifier / appliquer
 #    03  agents         Supervision des applications (agents et cibles)
 #    04  alerting       Canaux d'alerte (Slack, Teams, Telegram, e-mail...)
-#    05  grafana        Grafana + tableau de bord
+#    05  grafana        Grafana + tableaux de bord (sur cette machine ou une autre)
 #    06  exploitation   État, alertes, maintenance (silences), rechargement
 #    07  sauvegarde     Sauvegarde et restauration de la configuration
+#    08  test           Test des alertes d'une application (règles + envoi simulé)
 #    99  nettoyage      Suppression d'une installation précédente
 #
 #  Aide détaillée d'une étape :  ./prometheus-bundle.sh <étape> aide
@@ -111,6 +112,8 @@ set -uo pipefail
 : "${GRAFANA_ADMIN_PASSWORD:=}"      # vide = mot de passe généré
 # URL de Prometheus vue par Grafana
 : "${GRAFANA_PROMETHEUS_URL:=http://127.0.0.1:9090}"
+# Machine Grafana distante (ex. admin@grafana01) ; vide = Grafana sur cette machine
+: "${GRAFANA_HOTE_DISTANT:=}"
 
 # --- Seuils des règles d'alerte ----------------------------------------------
 #  Après modification : ./prometheus-bundle.sh 02 appliquer
@@ -297,7 +300,9 @@ ecrire_fichier() {
     local dst="$1" owner="$2" mode="$3" tmp
     tmp="$(mktemp "${dst}.XXXXXX")" || die "Écriture impossible : ${dst}"
     cat > "${tmp}"
-    chown "${owner}" "${tmp}" && chmod "${mode}" "${tmp}" && mv -f "${tmp}" "${dst}"
+    if ! { chown "${owner}" "${tmp}" && chmod "${mode}" "${tmp}" && mv -f "${tmp}" "${dst}"; }; then
+        rm -f "${tmp}"; die "Écriture impossible : ${dst} (propriétaire ${owner})"
+    fi
 }
 
 creer_compte() {
@@ -1822,7 +1827,7 @@ deployer_regles() {
     done < <(applications_actives)
     install -d -m 0755 -o root -g "${PROMETHEUS_USER}" "${PROMETHEUS_CONF_DIR}/rules"
     for r in "${fichiers[@]}"; do
-        regles_generer "${r}" | ecrire_fichier "${PROMETHEUS_CONF_DIR}/rules/${r}.yml" "root:${PROMETHEUS_USER}" 0640
+        regles_generer "${r}" | ecrire_fichier "${PROMETHEUS_CONF_DIR}/rules/${r}.yml" "root:${PROMETHEUS_USER}" 0640 || exit 1
     done
     # Retire les règles d'applications désactivées (fichiers générés par le bundle)
     for r in "${PROMETHEUS_CONF_DIR}"/rules/*.yml; do
@@ -1864,10 +1869,10 @@ appliquer_alertmanager() {
     local cfg="${ALERTMANAGER_CONF_DIR}/alertmanager.yml" bak
     install -d -m 0750 -o root -g "${ALERTMANAGER_USER}" "${ALERTMANAGER_CONF_DIR}/canaux.d"
     install -d -m 0755 -o root -g "${ALERTMANAGER_USER}" "${ALERTMANAGER_CONF_DIR}/templates"
-    modele_messages_fr | ecrire_fichier "${ALERTMANAGER_CONF_DIR}/templates/francais.tmpl" "root:${ALERTMANAGER_USER}" 0644
+    modele_messages_fr | ecrire_fichier "${ALERTMANAGER_CONF_DIR}/templates/francais.tmpl" "root:${ALERTMANAGER_USER}" 0644 || exit 1
     bak="$(workdir)/alertmanager.yml.prec"
     [[ -f "${cfg}" ]] && cp -p "${cfg}" "${bak}"
-    generer_alertmanager_yml | ecrire_fichier "${cfg}" "root:${ALERTMANAGER_USER}" 0640
+    generer_alertmanager_yml | ecrire_fichier "${cfg}" "root:${ALERTMANAGER_USER}" 0640 || exit 1
     if ! valider_alertmanager; then
         [[ -f "${bak}" ]] && cp -p "${bak}" "${cfg}"
         log_error "Configuration Alertmanager invalide : version précédente restaurée"
@@ -2047,15 +2052,15 @@ EOF
     for f in "${PROMETHEUS_CONF_DIR}/prometheus.yml" "${ALERTMANAGER_CONF_DIR}/alertmanager.yml"; do
         [[ -f "${f}" ]] && cp -p "${f}" "${f}.bak.$(date +%Y%m%d_%H%M%S)"
     done
-    generer_prometheus_yml | ecrire_fichier "${PROMETHEUS_CONF_DIR}/prometheus.yml" "root:${PROMETHEUS_USER}" 0640
+    generer_prometheus_yml | ecrire_fichier "${PROMETHEUS_CONF_DIR}/prometheus.yml" "root:${PROMETHEUS_USER}" 0640 || exit 1
     deployer_regles
     valider_prometheus || die "Configuration Prometheus invalide"
     appliquer_alertmanager || die "Configuration Alertmanager invalide"
     log_ok "Configurations générées et validées"
 
     titre "Services"
-    unite_prometheus   | ecrire_fichier "${SYSTEMD_DIR}/prometheus.service" root:root 0644
-    unite_alertmanager | ecrire_fichier "${SYSTEMD_DIR}/alertmanager.service" root:root 0644
+    unite_prometheus   | ecrire_fichier "${SYSTEMD_DIR}/prometheus.service" root:root 0644 || exit 1
+    unite_alertmanager | ecrire_fichier "${SYSTEMD_DIR}/alertmanager.service" root:root 0644 || exit 1
     restaurer_selinux "${BIN_DIR}" "${PROMETHEUS_CONF_DIR}" "${ALERTMANAGER_CONF_DIR}" \
         "${PROMETHEUS_DATA_DIR}" "${ALERTMANAGER_DATA_DIR}" "${SYSTEMD_DIR}"
     systemctl daemon-reload
@@ -2125,7 +2130,7 @@ etape_02() {
         titre "02 - Application de la configuration"
         local u avant
         cp -p "${PROMETHEUS_CONF_DIR}/prometheus.yml" "$(workdir)/prometheus.yml.prec"
-        generer_prometheus_yml | ecrire_fichier "${PROMETHEUS_CONF_DIR}/prometheus.yml" "root:${PROMETHEUS_USER}" 0640
+        generer_prometheus_yml | ecrire_fichier "${PROMETHEUS_CONF_DIR}/prometheus.yml" "root:${PROMETHEUS_USER}" 0640 || exit 1
         deployer_regles
         if ! valider_prometheus; then
             cp -p "$(workdir)/prometheus.yml.prec" "${PROMETHEUS_CONF_DIR}/prometheus.yml"
@@ -2134,7 +2139,7 @@ etape_02() {
         appliquer_alertmanager || true
         for u in prometheus alertmanager; do
             avant="$(cat "${SYSTEMD_DIR}/${u}.service" 2>/dev/null)"
-            "unite_${u}" | ecrire_fichier "${SYSTEMD_DIR}/${u}.service" root:root 0644
+            "unite_${u}" | ecrire_fichier "${SYSTEMD_DIR}/${u}.service" root:root 0644 || exit 1
             if [[ "${avant}" != "$(cat "${SYSTEMD_DIR}/${u}.service")" ]]; then
                 systemctl daemon-reload
                 systemctl restart "${u}" && log_ok "${u} redémarré (paramètres de service modifiés)"
@@ -2382,7 +2387,7 @@ agent_installer() {
     systemctl is-active --quiet "${APP_BIN}" 2>/dev/null && systemctl stop "${APP_BIN}"
     extraire_binaire "${archive}" "${APP_BIN}" "${BIN_DIR}/${APP_BIN}"
     if [[ -n "${AG_ENV}" ]]; then
-        printf '%s\n' "${AG_ENV}" | ecrire_fichier "${dir}/${APP_BIN}.env" "root:root" 0600
+        printf '%s\n' "${AG_ENV}" | ecrire_fichier "${dir}/${APP_BIN}.env" "root:root" 0600 || exit 1
     fi
     unit="${SYSTEMD_DIR}/${APP_BIN}.service"
     ecrire_fichier "${unit}" root:root 0644 <<EOF
@@ -2551,7 +2556,7 @@ cible_ajouter() {
     [[ -f "${tf}" ]] || echo "# ${MARQUEUR} — cibles ${app}" | ecrire_fichier "${tf}" "root:${PROMETHEUS_USER}" 0644
     printf -- '- targets: ["%s"]\n  labels: %s\n' "${cible}" "$(libelles_yaml "${libelles}")" >> "${tf}"
     if [[ ! -f "${sf}" ]]; then
-        scrape_job "${app}" | ecrire_fichier "${sf}" "root:${PROMETHEUS_USER}" 0644
+        scrape_job "${app}" | ecrire_fichier "${sf}" "root:${PROMETHEUS_USER}" 0644 || exit 1
         deployer_regles
         if ! valider_prometheus; then
             rm -f "${sf}"; deployer_regles
@@ -2575,7 +2580,7 @@ cible_retirer() {
     fi
     grep -qF -- "- targets: [\"${cible}\"]" "${tf}" || die "Cible introuvable : ${cible}"
     awk -v l="- targets: [\"${cible}\"]" '$0 == l {saut=1; next} saut && /^  labels:/ {saut=0; next} {saut=0; print}' "${tf}" \
-        | ecrire_fichier "${tf}" "root:${PROMETHEUS_USER}" 0644
+        | ecrire_fichier "${tf}" "root:${PROMETHEUS_USER}" 0644 || exit 1
     [[ "${mode}" == silencieux ]] && return 0
     log_ok "Cible retirée : ${app} → ${cible}"
     if ! grep -q -- '- targets:' "${tf}"; then
@@ -2928,7 +2933,7 @@ canal_ajouter() {
     install -d -m 0750 -o root -g "${ALERTMANAGER_USER}" "${ALERTMANAGER_CONF_DIR}/canaux.d"
     local prec=""; [[ -f "${f}" ]] && prec="$(cat "${f}")"
     printf '# type: %s\n# severites: %s\n%s\n' "${type}" "${sev}" "${contenu}" \
-        | ecrire_fichier "${f}" "root:${ALERTMANAGER_USER}" 0640
+        | ecrire_fichier "${f}" "root:${ALERTMANAGER_USER}" 0640 || exit 1
     if ! appliquer_alertmanager; then
         if [[ -n "${prec}" ]]; then printf '%s\n' "${prec}" > "${f}"; else rm -f "${f}"; fi
         appliquer_alertmanager >/dev/null 2>&1
@@ -3001,10 +3006,14 @@ EOF
 }
 
 # =============================================================================
-#  05 — GRAFANA ET TABLEAU DE BORD
+#  05 — GRAFANA ET TABLEAUX DE BORD
 # =============================================================================
 GRAFANA_DASH_DIR="/var/lib/grafana/dashboards/prometheus-bundle"
 GRAFANA_PROV_DIR="/etc/grafana/provisioning"
+DS_JSON='{"type": "prometheus", "uid": "prometheus-bundle"}'
+# Groupe du compte grafana (« grafana » avec les paquets, « root » dans l'image Docker officielle)
+grafana_groupe() { id -gn grafana 2>/dev/null || echo grafana; }
+LIENS_JSON='[{"title": "Vue d'"'"'ensemble", "type": "link", "url": "/d/prometheus-bundle-vue", "icon": "dashboard", "keepTime": true}, {"title": "Tableaux par application", "type": "dashboards", "tags": ["prometheus-bundle"], "asDropdown": true, "keepTime": true}]'
 
 tableau_de_bord_json() {
     FS_FILTRE_JSON="${FS_FILTRE//\"/\\\"}"
@@ -3014,6 +3023,7 @@ tableau_de_bord_json() {
   "title": "Supervision — Vue d'ensemble",
   "description": "Tableau de bord Prometheus-bundle : état des services, alertes, serveurs et sites web",
   "tags": ["prometheus-bundle", "supervision"],
+  "links": [{"title": "Tableaux par application", "type": "dashboards", "tags": ["prometheus-bundle"], "asDropdown": true, "keepTime": true}],
   "timezone": "browser",
   "editable": false,
   "graphTooltip": 1,
@@ -3279,6 +3289,338 @@ tableau_de_bord_json() {
 EOF
 }
 
+
+# --- Tableaux par application -------------------------------------------------
+TABLEAUX=(linux windows sondes mysql postgresql redis mongodb memcached elasticsearch
+          nginx apache phpfpm haproxy rabbitmq kafka jvm process docker application)
+
+# Application (clé du catalogue) -> tableau de bord
+tableau_de_app() {
+    case "$1" in http|tcp|icmp) echo sondes ;; springboot) echo jvm ;; *) echo "$1" ;; esac
+}
+
+# tableau_meta <tableau> : TB_TITRE, TB_JOBS (regex des jobs), TB_VAR (requête de la liste des instances)
+tableau_meta() {
+    TB_JOBS="$1"; TB_VAR=""
+    case "$1" in
+        linux)         TB_TITRE="Serveur Linux" ;;
+        windows)       TB_TITRE="Serveur Windows" ;;
+        sondes)        TB_TITRE="Sites web et sondes"; TB_JOBS="http|tcp|icmp"; TB_VAR="label_values(probe_success, instance)" ;;
+        mysql)         TB_TITRE="MySQL / MariaDB" ;;
+        postgresql)    TB_TITRE="PostgreSQL" ;;
+        redis)         TB_TITRE="Redis" ;;
+        mongodb)       TB_TITRE="MongoDB" ;;
+        memcached)     TB_TITRE="Memcached" ;;
+        elasticsearch) TB_TITRE="Elasticsearch" ;;
+        nginx)         TB_TITRE="Nginx" ;;
+        apache)        TB_TITRE="Apache httpd" ;;
+        phpfpm)        TB_TITRE="PHP-FPM" ;;
+        haproxy)       TB_TITRE="HAProxy" ;;
+        rabbitmq)      TB_TITRE="RabbitMQ" ;;
+        kafka)         TB_TITRE="Kafka" ;;
+        jvm)           TB_TITRE="Applications Java / Spring Boot"; TB_JOBS="jvm|springboot" ;;
+        process)       TB_TITRE="Processus" ;;
+        docker)        TB_TITRE="Conteneurs Docker" ;;
+        application)   TB_TITRE="Application instrumentée"; TB_JOBS="application.*" ;;
+        *) return 1 ;;
+    esac
+    [[ -n "${TB_VAR}" ]] || TB_VAR="label_values(up{job=~\"${TB_JOBS}\"}, instance)"
+}
+
+# Description compacte des panneaux, une ligne par panneau :
+#   type§largeur§titre§unité§seuils§requête##légende;;requête##légende
+# type : etat (1=OK/0=EN PANNE), couleur (0 vert/1 jaune/2 rouge), stat, gauge, bargauge, ts (courbe)
+# seuils : "orange,rouge" ou "inv:rouge_sous,vert_au_dessus" ; @SEL@ = filtre job + instance choisie
+tableau_spec() {
+    case "$1" in
+linux) cat <<'EOF' ;;
+etat§4§Disponibilité§§§up{@SEL@}
+stat§4§Démarré depuis§s§§time() - node_boot_time_seconds{@SEL@}
+stat§4§Processeurs§short§§count(node_cpu_seconds_total{@SEL@, mode="idle"})
+stat§4§Mémoire totale§bytes§§node_memory_MemTotal_bytes{@SEL@}
+stat§4§Services systemd en échec§short§1,1§count(node_systemd_unit_state{@SEL@, state="failed"} == 1) or vector(0)
+stat§4§Charge (15 min)§short§§node_load15{@SEL@}
+gauge§8§Processeur§percent§@@SEUIL_CPU_WARN@@,@@SEUIL_CPU_CRIT@@§100 - avg(rate(node_cpu_seconds_total{@SEL@, mode="idle"}[5m])) * 100
+gauge§8§Mémoire§percent§@@SEUIL_MEMOIRE_WARN@@,@@SEUIL_MEMOIRE_CRIT@@§(1 - node_memory_MemAvailable_bytes{@SEL@} / node_memory_MemTotal_bytes{@SEL@}) * 100
+gauge§8§Swap§percent§50,80§(1 - node_memory_SwapFree_bytes{@SEL@} / node_memory_SwapTotal_bytes{@SEL@}) * 100
+ts§12§Processeur par activité§percent§§sum by (mode) (rate(node_cpu_seconds_total{@SEL@, mode!="idle"}[$__rate_interval])) / scalar(count(node_cpu_seconds_total{@SEL@, mode="idle"})) * 100##{{mode}}
+ts§12§Charge moyenne§short§§node_load1{@SEL@}##1 min;;node_load5{@SEL@}##5 min;;node_load15{@SEL@}##15 min
+ts§12§Mémoire§bytes§§node_memory_MemTotal_bytes{@SEL@} - node_memory_MemAvailable_bytes{@SEL@}##utilisée;;node_memory_Cached_bytes{@SEL@} + node_memory_Buffers_bytes{@SEL@}##cache;;node_memory_MemAvailable_bytes{@SEL@}##disponible
+bargauge§12§Remplissage des disques§percent§@@SEUIL_DISQUE_WARN@@,@@SEUIL_DISQUE_CRIT@@§(1 - node_filesystem_avail_bytes{@SEL@, @@FS_FILTRE@@} / node_filesystem_size_bytes{@SEL@, @@FS_FILTRE@@}) * 100##{{mountpoint}}
+ts§12§Débit disque§Bps§§sum by (device) (rate(node_disk_read_bytes_total{@SEL@}[$__rate_interval]))##lecture {{device}};;sum by (device) (rate(node_disk_written_bytes_total{@SEL@}[$__rate_interval]))##écriture {{device}}
+ts§12§Trafic réseau§bps§§sum by (device) (rate(node_network_receive_bytes_total{@SEL@, device!~"lo|veth.*|docker.*|br-.*"}[$__rate_interval])) * 8##reçu {{device}};;sum by (device) (rate(node_network_transmit_bytes_total{@SEL@, device!~"lo|veth.*|docker.*|br-.*"}[$__rate_interval])) * 8##émis {{device}}
+EOF
+windows) cat <<'EOF' ;;
+etat§4§Disponibilité§§§up{@SEL@}
+stat§4§Démarré depuis§s§§time() - windows_system_boot_time_timestamp_seconds{@SEL@}
+stat§4§Processeurs§short§§count(windows_cpu_time_total{@SEL@, mode="idle"})
+stat§4§Mémoire totale§bytes§§windows_memory_physical_total_bytes{@SEL@}
+stat§8§Services automatiques arrêtés§short§1,1§count(windows_service_state{@SEL@, state="stopped"} == 1 and on (instance, name) windows_service_start_mode{start_mode="auto"} == 1) or vector(0)
+gauge§8§Processeur§percent§@@SEUIL_CPU_WARN@@,@@SEUIL_CPU_CRIT@@§100 - avg(rate(windows_cpu_time_total{@SEL@, mode="idle"}[5m])) * 100
+gauge§8§Mémoire§percent§@@SEUIL_MEMOIRE_WARN@@,@@SEUIL_MEMOIRE_CRIT@@§100 - windows_memory_available_bytes{@SEL@} / windows_memory_physical_total_bytes{@SEL@} * 100
+bargauge§8§Disques§percent§@@SEUIL_DISQUE_WARN@@,@@SEUIL_DISQUE_CRIT@@§100 - windows_logical_disk_free_bytes{@SEL@, volume!~"HarddiskVolume.*"} / windows_logical_disk_size_bytes{@SEL@, volume!~"HarddiskVolume.*"} * 100##{{volume}}
+ts§12§Processeur§percent§§100 - avg(rate(windows_cpu_time_total{@SEL@, mode="idle"}[$__rate_interval])) * 100##processeur
+ts§12§Trafic réseau§bps§§sum by (nic) (rate(windows_net_bytes_received_total{@SEL@}[$__rate_interval])) * 8##reçu {{nic}};;sum by (nic) (rate(windows_net_bytes_sent_total{@SEL@}[$__rate_interval])) * 8##émis {{nic}}
+EOF
+sondes) cat <<'EOF' ;;
+etat§4§État§§§probe_success{@SEL@}
+stat§4§Code HTTP§none§§probe_http_status_code{@SEL@}
+stat§4§Temps de réponse§s§@@SEUIL_HTTP_LATENCE_S@@,@@SEUIL_HTTP_LATENCE_S@@§probe_duration_seconds{@SEL@}
+stat§4§Certificat (jours restants)§short§inv:@@SEUIL_CERT_JOURS_CRIT@@,@@SEUIL_CERT_JOURS_WARN@@§(probe_ssl_earliest_cert_expiry{@SEL@} - time()) / 86400
+stat§4§Disponibilité 24 h§percentunit§inv:0.95,0.99§avg_over_time(probe_success{@SEL@}[24h])
+stat§4§Disponibilité 30 jours§percentunit§inv:0.95,0.99§avg_over_time(probe_success{@SEL@}[30d])
+ts§24§Temps de réponse par phase (HTTP)§s§§probe_http_duration_seconds{@SEL@}##{{phase}}
+ts§12§Résultat de la sonde (1 = OK)§short§§probe_success{@SEL@}##{{instance}}
+ts§12§Temps de réponse total§s§@@SEUIL_HTTP_LATENCE_S@@,@@SEUIL_HTTP_LATENCE_S@@§probe_duration_seconds{@SEL@}##{{instance}}
+EOF
+mysql) cat <<'EOF' ;;
+etat§4§MySQL§§§mysql_up{@SEL@}
+stat§4§Démarré depuis§s§§mysql_global_status_uptime{@SEL@}
+stat§4§Connexions§short§§mysql_global_status_threads_connected{@SEL@}
+gauge§4§Connexions utilisées§percent§@@SEUIL_CONNEXIONS_PCT@@,95§mysql_global_status_threads_connected{@SEL@} / mysql_global_variables_max_connections{@SEL@} * 100
+stat§4§Requêtes en cours§short§20,50§mysql_global_status_threads_running{@SEL@}
+stat§4§Retard de réplication§s§@@SEUIL_REPLICATION_RETARD_S@@,@@SEUIL_REPLICATION_RETARD_S@@§mysql_slave_status_seconds_behind_master{@SEL@}
+ts§12§Requêtes par seconde§ops§§rate(mysql_global_status_queries{@SEL@}[$__rate_interval])##requêtes;;rate(mysql_global_status_slow_queries{@SEL@}[$__rate_interval])##lentes
+ts§12§Commandes SQL§ops§§rate(mysql_global_status_commands_total{@SEL@, command=~"select|insert|update|delete|replace|commit|rollback"}[$__rate_interval])##{{command}}
+ts§12§Connexions§short§§mysql_global_status_threads_connected{@SEL@}##connectées;;mysql_global_status_threads_running{@SEL@}##actives;;mysql_global_variables_max_connections{@SEL@}##maximum
+ts§12§Pool de tampons InnoDB§bytes§§mysql_global_status_innodb_buffer_pool_bytes_data{@SEL@}##données;;mysql_global_variables_innodb_buffer_pool_size{@SEL@}##taille
+ts§12§Trafic réseau§Bps§§rate(mysql_global_status_bytes_received{@SEL@}[$__rate_interval])##reçu;;rate(mysql_global_status_bytes_sent{@SEL@}[$__rate_interval])##envoyé
+ts§12§Attentes de verrous§ops§§rate(mysql_global_status_innodb_row_lock_waits{@SEL@}[$__rate_interval])##lignes InnoDB;;rate(mysql_global_status_table_locks_waited{@SEL@}[$__rate_interval])##tables
+EOF
+postgresql) cat <<'EOF' ;;
+etat§4§PostgreSQL§§§pg_up{@SEL@}
+stat§4§Démarré depuis§s§§time() - pg_postmaster_start_time_seconds{@SEL@}
+stat§4§Connexions§short§§sum(pg_stat_activity_count{@SEL@})
+gauge§4§Connexions utilisées§percent§@@SEUIL_CONNEXIONS_PCT@@,95§sum(pg_stat_activity_count{@SEL@}) / max(pg_settings_max_connections{@SEL@}) * 100
+stat§4§Taille des bases§bytes§§sum(pg_database_size_bytes{@SEL@})
+stat§4§Retard de réplication§s§@@SEUIL_REPLICATION_RETARD_S@@,@@SEUIL_REPLICATION_RETARD_S@@§max(pg_replication_lag_seconds{@SEL@}) and max(pg_replication_is_replica{@SEL@}) == 1
+ts§12§Transactions par seconde§ops§§sum(rate(pg_stat_database_xact_commit{@SEL@}[$__rate_interval]))##validées;;sum(rate(pg_stat_database_xact_rollback{@SEL@}[$__rate_interval]))##annulées
+ts§12§Connexions par état§short§§sum by (state) (pg_stat_activity_count{@SEL@})##{{state}}
+ts§12§Lignes lues et écrites§ops§§sum(rate(pg_stat_database_tup_fetched{@SEL@}[$__rate_interval]))##lues;;sum(rate(pg_stat_database_tup_inserted{@SEL@}[$__rate_interval]))##insérées;;sum(rate(pg_stat_database_tup_updated{@SEL@}[$__rate_interval]))##modifiées;;sum(rate(pg_stat_database_tup_deleted{@SEL@}[$__rate_interval]))##supprimées
+ts§12§Taux de lecture en cache§percentunit§§sum(rate(pg_stat_database_blks_hit{@SEL@}[$__rate_interval])) / (sum(rate(pg_stat_database_blks_hit{@SEL@}[$__rate_interval])) + sum(rate(pg_stat_database_blks_read{@SEL@}[$__rate_interval])))##cache
+bargauge§12§Taille par base§bytes§§pg_database_size_bytes{@SEL@, datname!~"template.*"}##{{datname}}
+ts§12§Verrous et interblocages§short§§sum by (mode) (pg_locks_count{@SEL@})##{{mode}};;sum(increase(pg_stat_database_deadlocks{@SEL@}[$__rate_interval]))##interblocages
+EOF
+redis) cat <<'EOF' ;;
+etat§4§Redis§§§redis_up{@SEL@}
+stat§4§Démarré depuis§s§§redis_uptime_in_seconds{@SEL@}
+stat§4§Clients connectés§short§§redis_connected_clients{@SEL@}
+stat§4§Mémoire utilisée§bytes§§redis_memory_used_bytes{@SEL@}
+stat§4§Clés§short§§sum(redis_db_keys{@SEL@})
+stat§4§Taux de succès du cache§percentunit§inv:0.8,0.9§rate(redis_keyspace_hits_total{@SEL@}[5m]) / (rate(redis_keyspace_hits_total{@SEL@}[5m]) + rate(redis_keyspace_misses_total{@SEL@}[5m]))
+ts§12§Commandes par seconde§ops§§rate(redis_commands_processed_total{@SEL@}[$__rate_interval])##commandes
+ts§12§Mémoire§bytes§§redis_memory_used_bytes{@SEL@}##utilisée;;redis_memory_max_bytes{@SEL@} > 0##maximum
+ts§12§Lectures trouvées / manquées§ops§§rate(redis_keyspace_hits_total{@SEL@}[$__rate_interval])##trouvées;;rate(redis_keyspace_misses_total{@SEL@}[$__rate_interval])##manquées
+ts§12§Clés évincées et expirées§ops§§rate(redis_evicted_keys_total{@SEL@}[$__rate_interval])##évincées;;rate(redis_expired_keys_total{@SEL@}[$__rate_interval])##expirées
+EOF
+mongodb) cat <<'EOF' ;;
+etat§6§MongoDB§§§mongodb_up{@SEL@}
+stat§6§Démarré depuis§s§§mongodb_ss_uptime{@SEL@}
+stat§6§Connexions§short§§mongodb_ss_connections{@SEL@, conn_type="current"}
+stat§6§Membres du replica set en panne§short§1,1§count(mongodb_rs_members_health{@SEL@} == 0) or vector(0)
+ts§12§Opérations par seconde§ops§§sum by (legacy_op_type) (rate(mongodb_ss_opcounters{@SEL@}[$__rate_interval]))##{{legacy_op_type}}
+ts§12§Connexions§short§§mongodb_ss_connections{@SEL@, conn_type="current"}##actives;;mongodb_ss_connections{@SEL@, conn_type="available"}##disponibles
+ts§12§Mémoire résidente§bytes§§mongodb_ss_mem_resident{@SEL@} * 1024 * 1024##résidente
+ts§12§Retard de réplication§s§@@SEUIL_REPLICATION_RETARD_S@@,@@SEUIL_REPLICATION_RETARD_S@@§mongodb_mongod_replset_member_replication_lag{@SEL@}##{{name}}
+EOF
+memcached) cat <<'EOF' ;;
+etat§6§Memcached§§§memcached_up{@SEL@}
+stat§6§Connexions§short§§memcached_current_connections{@SEL@}
+stat§6§Éléments en cache§short§§memcached_current_items{@SEL@}
+gauge§6§Mémoire utilisée§percent§80,95§memcached_current_bytes{@SEL@} / memcached_limit_bytes{@SEL@} * 100
+ts§12§Commandes par seconde§ops§§sum by (command, status) (rate(memcached_commands_total{@SEL@}[$__rate_interval]))##{{command}} {{status}}
+ts§12§Évictions§ops§§rate(memcached_items_evicted_total{@SEL@}[$__rate_interval])##évictions
+EOF
+elasticsearch) cat <<'EOF' ;;
+etat§4§Agent§§§elasticsearch_cluster_health_up{@SEL@}
+couleur§4§État du cluster§§§max(elasticsearch_cluster_health_status{@SEL@, color="yellow"}) + 2 * max(elasticsearch_cluster_health_status{@SEL@, color="red"})
+stat§4§Nœuds§short§§max(elasticsearch_cluster_health_number_of_nodes{@SEL@})
+stat§4§Shards non alloués§short§1,1§max(elasticsearch_cluster_health_unassigned_shards{@SEL@})
+stat§4§Documents§short§§sum(elasticsearch_indices_docs{@SEL@})
+stat§4§Volume des données§bytes§§sum(elasticsearch_indices_store_size_bytes{@SEL@})
+bargauge§12§Heap JVM par nœud§percent§@@SEUIL_JVM_HEAP_PCT@@,95§elasticsearch_jvm_memory_used_bytes{@SEL@, area="heap"} / elasticsearch_jvm_memory_max_bytes{@SEL@, area="heap"} * 100##{{name}}
+bargauge§12§Disque par nœud§percent§85,95§(1 - elasticsearch_filesystem_data_available_bytes{@SEL@} / elasticsearch_filesystem_data_size_bytes{@SEL@}) * 100##{{name}}
+ts§12§Indexations et recherches§ops§§sum(rate(elasticsearch_indices_indexing_index_total{@SEL@}[$__rate_interval]))##indexations;;sum(rate(elasticsearch_indices_search_query_total{@SEL@}[$__rate_interval]))##recherches
+ts§12§Temps passé en GC§s§§sum by (name) (rate(elasticsearch_jvm_gc_collection_seconds_sum{@SEL@}[$__rate_interval]))##{{name}}
+EOF
+nginx) cat <<'EOF' ;;
+etat§6§Nginx§§§nginx_up{@SEL@}
+stat§6§Connexions actives§short§@@SEUIL_NGINX_CONNEXIONS@@,@@SEUIL_NGINX_CONNEXIONS@@§nginx_connections_active{@SEL@}
+stat§6§Requêtes par seconde§reqps§§rate(nginx_http_requests_total{@SEL@}[5m])
+stat§6§Connexions abandonnées (5 min)§short§1,1§increase(nginx_connections_accepted{@SEL@}[5m]) - increase(nginx_connections_handled{@SEL@}[5m])
+ts§12§Requêtes par seconde§reqps§§rate(nginx_http_requests_total{@SEL@}[$__rate_interval])##requêtes
+ts§12§Connexions§short§§nginx_connections_active{@SEL@}##actives;;nginx_connections_reading{@SEL@}##lecture;;nginx_connections_writing{@SEL@}##écriture;;nginx_connections_waiting{@SEL@}##en attente
+EOF
+apache) cat <<'EOF' ;;
+etat§6§Apache§§§apache_up{@SEL@}
+stat§6§Démarré depuis§s§§apache_uptime_seconds_total{@SEL@}
+gauge§6§Workers occupés§percent§80,95§sum(apache_workers{@SEL@, state="busy"}) / sum(apache_workers{@SEL@}) * 100
+stat§6§Requêtes par seconde§reqps§§rate(apache_accesses_total{@SEL@}[5m])
+ts§12§Requêtes par seconde§reqps§§rate(apache_accesses_total{@SEL@}[$__rate_interval])##requêtes
+ts§12§Workers§short§§apache_workers{@SEL@}##{{state}}
+EOF
+phpfpm) cat <<'EOF' ;;
+etat§6§PHP-FPM§§§min(phpfpm_up{@SEL@})
+stat§6§Processus actifs§short§§sum(phpfpm_active_processes{@SEL@})
+stat§6§File d'attente§short§@@SEUIL_PHPFPM_FILE_ATTENTE@@,@@SEUIL_PHPFPM_FILE_ATTENTE@@§sum(phpfpm_listen_queue{@SEL@})
+stat§6§Saturations du pool (1 h)§short§1,1§sum(increase(phpfpm_max_children_reached{@SEL@}[1h]))
+ts§12§Processus par pool§short§§phpfpm_active_processes{@SEL@}##actifs {{pool}};;phpfpm_idle_processes{@SEL@}##libres {{pool}}
+ts§12§Requêtes par seconde§reqps§§sum by (pool) (rate(phpfpm_accepted_connections{@SEL@}[$__rate_interval]))##{{pool}}
+ts§12§Requêtes lentes§short§§sum by (pool) (increase(phpfpm_slow_requests{@SEL@}[$__rate_interval]))##{{pool}}
+ts§12§File d'attente§short§§phpfpm_listen_queue{@SEL@}##{{pool}}
+EOF
+haproxy) cat <<'EOF' ;;
+etat§6§HAProxy§§§up{@SEL@}
+stat§6§Backends sans serveur§short§1,1§count(haproxy_backend_active_servers{@SEL@} + haproxy_backend_backup_servers{@SEL@} == 0) or vector(0)
+stat§6§Serveurs DOWN§short§1,1§count(haproxy_server_status{@SEL@, state="DOWN"} == 1) or vector(0)
+stat§6§Sessions en cours§short§§sum(haproxy_frontend_current_sessions{@SEL@})
+ts§12§Requêtes par frontend§reqps§§sum by (proxy) (rate(haproxy_frontend_http_requests_total{@SEL@}[$__rate_interval]))##{{proxy}}
+ts§12§Erreurs 5xx par backend§reqps§§sum by (proxy) (rate(haproxy_backend_http_responses_total{@SEL@, code="5xx"}[$__rate_interval]))##{{proxy}}
+bargauge§12§Serveurs actifs par backend§short§§haproxy_backend_active_servers{@SEL@}##{{proxy}}
+ts§12§Temps de réponse moyen des backends§s§§haproxy_backend_response_time_average_seconds{@SEL@}##{{proxy}}
+EOF
+rabbitmq) cat <<'EOF' ;;
+etat§6§RabbitMQ§§§up{@SEL@}
+stat§6§Messages prêts§short§@@SEUIL_RABBITMQ_MESSAGES@@,@@SEUIL_RABBITMQ_MESSAGES@@§sum(rabbitmq_queue_messages_ready{@SEL@})
+stat§6§Messages non acquittés§short§@@SEUIL_RABBITMQ_MESSAGES@@,@@SEUIL_RABBITMQ_MESSAGES@@§sum(rabbitmq_queue_messages_unacked{@SEL@})
+stat§6§Alarmes actives§short§1,1§sum(rabbitmq_alarms_memory_used_watermark{@SEL@}) + sum(rabbitmq_alarms_free_disk_space_watermark{@SEL@})
+ts§12§Messages publiés et livrés§ops§§sum(rate(rabbitmq_global_messages_received_total{@SEL@}[$__rate_interval]))##publiés;;sum(rate(rabbitmq_global_messages_delivered_total{@SEL@}[$__rate_interval]))##livrés
+ts§12§Messages en file§short§§sum(rabbitmq_queue_messages_ready{@SEL@})##prêts;;sum(rabbitmq_queue_messages_unacked{@SEL@})##non acquittés
+ts§12§Connexions et consommateurs§short§§sum(rabbitmq_connections{@SEL@})##connexions;;sum(rabbitmq_queue_consumers{@SEL@})##consommateurs
+ts§12§Mémoire par nœud§bytes§§rabbitmq_process_resident_memory_bytes{@SEL@}##{{instance}}
+EOF
+kafka) cat <<'EOF' ;;
+stat§6§Brokers§short§§max(kafka_brokers{@SEL@})
+stat§6§Topics§short§§count(count by (topic) (kafka_topic_partitions{@SEL@}))
+stat§6§Partitions sous-répliquées§short§1,1§sum(kafka_topic_partition_under_replicated_partition{@SEL@})
+stat§6§Retard total des consommateurs§short§@@SEUIL_KAFKA_LAG@@,@@SEUIL_KAFKA_LAG@@§sum(kafka_consumergroup_lag{@SEL@})
+ts§12§Messages produits par topic§ops§§sum by (topic) (rate(kafka_topic_partition_current_offset{@SEL@}[$__rate_interval]))##{{topic}}
+ts§12§Retard par groupe de consommateurs§short§@@SEUIL_KAFKA_LAG@@,@@SEUIL_KAFKA_LAG@@§sum by (consumergroup) (kafka_consumergroup_lag{@SEL@})##{{consumergroup}}
+EOF
+jvm) cat <<'EOF' ;;
+etat§4§Application§§§up{@SEL@}
+stat§4§Démarrée depuis§s§§time() - process_start_time_seconds{@SEL@}
+gauge§4§Mémoire heap§percent§@@SEUIL_JVM_HEAP_PCT@@,95§sum(jvm_memory_used_bytes{@SEL@, area="heap"}) / sum(jvm_memory_max_bytes{@SEL@, area="heap"} > 0) * 100
+stat§4§Threads§short§@@SEUIL_JVM_THREADS@@,@@SEUIL_JVM_THREADS@@§max(jvm_threads_current{@SEL@} or jvm_threads_live_threads{@SEL@})
+stat§4§Erreurs HTTP 5xx§percent§@@SEUIL_HTTP_ERREURS_PCT@@,@@SEUIL_HTTP_ERREURS_PCT@@§sum(rate(http_server_requests_seconds_count{@SEL@, status=~"5.."}[5m])) / sum(rate(http_server_requests_seconds_count{@SEL@}[5m])) * 100
+stat§4§Temps de réponse moyen§s§@@SEUIL_HTTP_LATENCE_S@@,@@SEUIL_HTTP_LATENCE_S@@§sum(rate(http_server_requests_seconds_sum{@SEL@}[5m])) / sum(rate(http_server_requests_seconds_count{@SEL@}[5m]))
+ts§12§Mémoire heap§bytes§§sum(jvm_memory_used_bytes{@SEL@, area="heap"})##utilisée;;sum(jvm_memory_committed_bytes{@SEL@, area="heap"})##réservée;;sum(jvm_memory_max_bytes{@SEL@, area="heap"} > 0)##maximum
+ts§12§Part du temps en GC§percentunit§§sum(rate(jvm_gc_collection_seconds_sum{@SEL@}[$__rate_interval])) or sum(rate(jvm_gc_pause_seconds_sum{@SEL@}[$__rate_interval]))##ramasse-miettes
+ts§12§Requêtes HTTP par statut§reqps§§sum by (status) (rate(http_server_requests_seconds_count{@SEL@}[$__rate_interval]))##{{status}}
+ts§12§Threads§short§§max(jvm_threads_current{@SEL@} or jvm_threads_live_threads{@SEL@})##threads
+EOF
+process) cat <<'EOF' ;;
+bargauge§12§Instances par processus (0 = arrêté)§short§inv:1,1§namedprocess_namegroup_num_procs{@SEL@}##{{groupname}}
+bargauge§12§Mémoire résidente§bytes§§namedprocess_namegroup_memory_bytes{@SEL@, memtype="resident"}##{{groupname}}
+ts§12§Processeur par processus§percent§§sum by (groupname) (rate(namedprocess_namegroup_cpu_seconds_total{@SEL@}[$__rate_interval])) * 100##{{groupname}}
+ts§12§Descripteurs de fichiers ouverts§short§§namedprocess_namegroup_open_filedesc{@SEL@}##{{groupname}}
+EOF
+docker) cat <<'EOF' ;;
+stat§6§Conteneurs§short§§count(container_last_seen{@SEL@, name!=""})
+stat§6§Arrêts par manque de mémoire (24 h)§short§1,1§sum(increase(container_oom_events_total{@SEL@, name!=""}[24h])) or vector(0)
+bargauge§12§Mémoire par conteneur§bytes§§container_memory_working_set_bytes{@SEL@, name!=""}##{{name}}
+ts§12§Processeur par conteneur (% d'un cœur)§percent§§sum by (name) (rate(container_cpu_usage_seconds_total{@SEL@, name!=""}[$__rate_interval])) * 100##{{name}}
+ts§12§Réseau reçu par conteneur§bps§§sum by (name) (rate(container_network_receive_bytes_total{@SEL@, name!=""}[$__rate_interval])) * 8##{{name}}
+EOF
+application) cat <<'EOF' ;;
+etat§6§Application§§§up{@SEL@}
+stat§6§Démarrée depuis§s§§time() - process_start_time_seconds{@SEL@}
+stat§6§Requêtes par seconde§reqps§§sum(rate(http_requests_total{@SEL@}[5m]))
+stat§6§Erreurs HTTP 5xx§percent§@@SEUIL_HTTP_ERREURS_PCT@@,@@SEUIL_HTTP_ERREURS_PCT@@§sum(rate(http_requests_total{@SEL@, code=~"5.."}[5m])) / sum(rate(http_requests_total{@SEL@}[5m])) * 100
+ts§12§Requêtes par code HTTP§reqps§§sum by (code) (rate(http_requests_total{@SEL@}[$__rate_interval]))##{{code}}
+ts§12§Mémoire du processus§bytes§§process_resident_memory_bytes{@SEL@}##résidente
+ts§12§Processeur§percent§§rate(process_cpu_seconds_total{@SEL@}[$__rate_interval]) * 100##processeur
+ts§12§Descripteurs de fichiers§short§§process_open_fds{@SEL@}##ouverts;;process_max_fds{@SEL@}##maximum
+EOF
+    *) return 1 ;;
+    esac
+}
+
+json_echap() { local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "${s}"; }
+
+seuils_json() {
+    local s="$1" a b
+    if [[ -z "${s}" ]]; then
+        echo '{"mode": "absolute", "steps": [{"color": "green", "value": null}]}'
+    elif [[ "${s}" == inv:* ]]; then
+        s="${s#inv:}"; a="${s%%,*}"; b="${s##*,}"
+        echo "{\"mode\": \"absolute\", \"steps\": [{\"color\": \"red\", \"value\": null}, {\"color\": \"orange\", \"value\": ${a}}, {\"color\": \"green\", \"value\": ${b}}]}"
+    else
+        a="${s%%,*}"; b="${s##*,}"
+        echo "{\"mode\": \"absolute\", \"steps\": [{\"color\": \"green\", \"value\": null}, {\"color\": \"orange\", \"value\": ${a}}, {\"color\": \"red\", \"value\": ${b}}]}"
+    fi
+}
+
+# Construit le JSON Grafana d'un tableau de bord applicatif
+tableau_app_json() {
+    local tb="$1" ligne type larg titre unite seuils requetes
+    tableau_meta "${tb}" || die "Tableau inconnu : ${tb}"
+    local sel="job=~\"${TB_JOBS}\", instance=~\"\$instance\""
+    local x=0 y=0 hligne=0 id=1 h panneaux="" premier=1
+    while IFS= read -r ligne; do
+        [[ -n "${ligne}" ]] || continue
+        # Découpage manuel (sûr pour un séparateur multi-octets, quelle que soit la locale)
+        type="${ligne%%§*}";   ligne="${ligne#*§}"
+        larg="${ligne%%§*}";   ligne="${ligne#*§}"
+        titre="${ligne%%§*}";  ligne="${ligne#*§}"
+        unite="${ligne%%§*}";  ligne="${ligne#*§}"
+        seuils="${ligne%%§*}"; requetes="${ligne#*§}"
+        case "${type}" in ts|bargauge) h=8 ;; gauge) h=6 ;; *) h=4 ;; esac
+        if (( x + larg > 24 )); then x=0; y=$((y + hligne)); hligne=0; fi
+        # Requêtes
+        local cibles="" r expr leg ref=A instant=false
+        [[ "${type}" != ts ]] && instant=true
+        IFS=';' read -ra _reqs <<<"${requetes//;;/;}"
+        for r in "${_reqs[@]}"; do
+            expr="${r%%##*}"; leg=""; [[ "${r}" == *"##"* ]] && leg="${r#*##}"
+            expr="${expr//@SEL@/${sel}}"
+            cibles+="${cibles:+, }{\"refId\": \"${ref}\", \"expr\": \"$(json_echap "${expr}")\", \"legendFormat\": \"$(json_echap "${leg}")\", \"instant\": ${instant}, \"range\": $([[ ${instant} == true ]] && echo false || echo true)}"
+            ref="$(printf "\\$(printf '%03o' $(( $(printf '%d' "'${ref}") + 1 )))")"
+        done
+        # Options selon le type
+        local gtype="${type}" options defaults minmax="" mappings=""
+        case "${unite}" in percent) minmax=', "min": 0, "max": 100' ;; percentunit) minmax=', "min": 0, "max": 1' ;; esac
+        case "${type}" in
+            etat)    gtype=stat; mappings=', "mappings": [{"type": "value", "options": {"1": {"text": "OK", "color": "green", "index": 0}, "0": {"text": "EN PANNE", "color": "red", "index": 1}}}]'
+                     seuils="" ;;
+            couleur) gtype=stat; mappings=', "mappings": [{"type": "value", "options": {"0": {"text": "VERT", "color": "green", "index": 0}, "1": {"text": "JAUNE", "color": "yellow", "index": 1}, "2": {"text": "ROUGE", "color": "red", "index": 2}}}]' ;;
+            ts)      gtype=timeseries ;;
+        esac
+        case "${gtype}" in
+            stat)       options='{"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "'"$([[ "${type}" =~ ^(etat|couleur)$ ]] && echo background || echo value)"'", "graphMode": "none", "textMode": "value", "justifyMode": "center"}' ;;
+            gauge)      options='{"reduceOptions": {"calcs": ["lastNotNull"]}, "showThresholdMarkers": true}' ;;
+            bargauge)   options='{"reduceOptions": {"calcs": ["lastNotNull"]}, "orientation": "horizontal", "displayMode": "basic", "showUnfilled": true, "valueMode": "color", "namePlacement": "left"}' ;;
+            timeseries) options='{"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}}' ;;
+        esac
+        if [[ "${gtype}" == timeseries ]]; then
+            defaults="{\"unit\": \"${unite:-short}\", \"noValue\": \"—\", \"color\": {\"mode\": \"palette-classic\"}, \"custom\": {\"lineWidth\": 2, \"fillOpacity\": 10, \"showPoints\": \"never\", \"thresholdsStyle\": {\"mode\": \"$([[ -n "${seuils}" ]] && echo dashed || echo off)\"}}, \"thresholds\": $(seuils_json "${seuils}")${minmax}}"
+        else
+            defaults="{\"unit\": \"${unite:-none}\", \"noValue\": \"—\", \"decimals\": $([[ "${unite}" =~ ^(percent|short|none|)$ ]] && echo 0 || echo 2), \"color\": {\"mode\": \"thresholds\"}, \"thresholds\": $(seuils_json "${seuils}")${minmax}${mappings}}"
+        fi
+        panneaux+="${premier:+}$([[ ${premier} -eq 1 ]] || echo ', ')
+    {\"id\": ${id}, \"type\": \"${gtype}\", \"title\": \"$(json_echap "${titre}")\", \"gridPos\": {\"h\": ${h}, \"w\": ${larg}, \"x\": ${x}, \"y\": ${y}}, \"datasource\": ${DS_JSON},
+     \"targets\": [${cibles}], \"options\": ${options}, \"fieldConfig\": {\"defaults\": ${defaults}, \"overrides\": []}}"
+        premier=0; id=$((id + 1)); x=$((x + larg)); (( h > hligne )) && hligne=${h}
+    done < <(tableau_spec "${tb}" | FS_FILTRE="${FS_FILTRE}" rendu)
+    cat <<EOF
+{
+  "uid": "prometheus-bundle-${tb}",
+  "title": "Supervision — $(json_echap "${TB_TITRE}")",
+  "tags": ["prometheus-bundle", "${tb}"],
+  "timezone": "browser", "editable": false, "graphTooltip": 1, "refresh": "1m", "schemaVersion": 39,
+  "time": {"from": "now-6h", "to": "now"},
+  "links": ${LIENS_JSON},
+  "templating": {"list": [{
+    "name": "instance", "label": "Instance", "type": "query", "datasource": ${DS_JSON},
+    "query": {"query": "$(json_echap "${TB_VAR}")", "refId": "instance"}, "definition": "$(json_echap "${TB_VAR}")",
+    "refresh": 2, "sort": 1, "includeAll": false, "multi": false}]},
+  "panels": [${panneaux}
+  ]
+}
+EOF
+}
+
+# --- Installation de Grafana -------------------------------------------------
 grafana_installer_paquet() {
     local fam paquet
     fam="$(famille_os)"
@@ -3317,33 +3659,104 @@ EOF
     esac
 }
 
-etape_05() {
-    local installer=yes
-    case "${1:-}" in
-        --sans-installation) installer=no ;;
-        tableau) installer=no ;;
-        aide|-h|--help) cat <<EOF
-05 — Grafana et tableau de bord
-  ${SCRIPT_NAME} 05                       installe Grafana (dépôt officiel ou packages/) et le configure
-  ${SCRIPT_NAME} 05 --sans-installation   Grafana déjà présent : configure seulement
-  ${SCRIPT_NAME} 05 tableau               régénère uniquement le tableau de bord (après 02 definir SEUIL_...)
-Source Prometheus : GRAFANA_PROMETHEUS_URL=${GRAFANA_PROMETHEUS_URL}
-EOF
-            return 0 ;;
-    esac
-    require_root
-    titre "05 - Grafana"
-    if [[ ! -d /usr/share/grafana ]]; then
-        [[ "${installer}" == yes ]] || die "Grafana n'est pas installé"
-        grafana_installer_paquet || die "Installation de Grafana impossible"
-        log_ok "Grafana installé"
-    else
-        log_info "Grafana déjà présent : configuration uniquement"
+# URL de Prometheus utilisable depuis une autre machine
+url_prometheus_publique() {
+    if [[ ! "${GRAFANA_PROMETHEUS_URL}" =~ ://(127\.0\.0\.1|localhost)[:/] ]]; then
+        echo "${GRAFANA_PROMETHEUS_URL}"; return
     fi
+    [[ "${PROMETHEUS_LISTEN_ADDRESS}" =~ ^(127\.|localhost) ]] \
+        && die "Prometheus n'écoute que sur ${PROMETHEUS_LISTEN_ADDRESS} : Grafana distant impossible (PROMETHEUS_LISTEN_ADDRESS=0.0.0.0)"
+    echo "http://$(hostname -f 2>/dev/null || hostname):${PROMETHEUS_PORT}"
+}
 
+# Exécute « 05 <arguments> » sur la machine Grafana distante
+grafana_distant() {
+    local dest="${GRAFANA_HOTE_DISTANT}" url args
+    cmd_exists ssh && cmd_exists scp || die "ssh et scp sont requis pour piloter Grafana à distance"
+    url="$(url_prometheus_publique)" || exit 1
+    # Un fichier à importer présent ici est copié sur la machine Grafana
+    if [[ "${1:-}" == importer && -f "${2:-}" ]]; then
+        scp -q "$2" "${dest}:/tmp/pb-import.json" || die "Copie de $2 impossible"
+        set -- importer /tmp/pb-import.json "$(basename "$2" .json)"
+    fi
+    args="$(printf '%q ' "$@")"
+    titre "Grafana sur ${dest} (Prometheus : ${url})"
+    if prometheus_installe && [[ "${OPEN_FIREWALL}" == yes ]]; then ouvrir_port "${PROMETHEUS_PORT}" prometheus; fi
+    scp -q "${SCRIPT_PATH}" "${dest}:/tmp/${SCRIPT_NAME}" || die "Copie SSH impossible vers ${dest}"
+    ssh -t "${dest}" "sudo PB_GRAFANA_LOCAL=oui ASSUME_YES=${ASSUME_YES:-no} GRAFANA_PROMETHEUS_URL=$(printf '%q' "${url}") GRAFANA_PORT=${GRAFANA_PORT} OPEN_FIREWALL=${OPEN_FIREWALL} ${GRAFANA_ADMIN_PASSWORD:+GRAFANA_ADMIN_PASSWORD=$(printf '%q' "${GRAFANA_ADMIN_PASSWORD}")} bash /tmp/${SCRIPT_NAME} 05 ${args}; r=\$?; rm -f /tmp/${SCRIPT_NAME}; exit \$r"
+}
+
+# Applications réellement supervisées, lues dans Prometheus (local ou distant)
+tableaux_detectes() {
+    local jobs j
+    jobs="$(http_get "${GRAFANA_PROMETHEUS_URL}/api/v1/label/job/values" 2>/dev/null \
+            | grep -o '"data":\[[^]]*\]' | grep -o '"[^"]*"' | tr -d '"' | grep -v '^data$')"
+    for j in ${jobs}; do
+        [[ " ${TABLEAUX[*]} ${APPLICATIONS[*]} " == *" ${j} "* ]] || continue
+        tableau_de_app "${j}"
+    done | sort -u
+}
+
+tableaux_installes() {
+    local f
+    for f in "${GRAFANA_DASH_DIR}"/app-*.json; do
+        [[ -f "${f}" ]] && { f="$(basename "${f}" .json)"; echo "${f#app-}"; }
+    done
+}
+
+tableau_installer() {
+    local tb="$1"
+    tableau_meta "${tb}" || die "Tableau inconnu : ${tb} (voir : ${SCRIPT_NAME} 05 tableaux)"
+    install -d -m 0755 -o grafana -g "$(grafana_groupe)" "${GRAFANA_DASH_DIR}"
+    tableau_app_json "${tb}" | ecrire_fichier "${GRAFANA_DASH_DIR}/app-${tb}.json" "grafana:$(grafana_groupe)" 0644 || exit 1
+    log_ok "Tableau « Supervision — ${TB_TITRE} » installé"
+}
+
+tableaux_lister() {
+    titre "Tableaux de bord disponibles"
+    local tb det inst
+    det=" $(tableaux_detectes | tr '\n' ' ') "; inst=" $(tableaux_installes | tr '\n' ' ') "
+    printf '   %-14s %-34s %-12s %s\n' "Nom" "Contenu" "Installé" "Application supervisée"
+    for tb in "${TABLEAUX[@]}"; do
+        tableau_meta "${tb}"
+        printf '   %-14s %-34s %-12s %s\n' "${tb}" "${TB_TITRE}" \
+            "$([[ "${inst}" == *" ${tb} "* ]] && echo "${C_G}oui${C_0}       " || echo "non")" \
+            "$([[ "${det}" == *" ${tb} "* ]] && echo "${C_G}oui${C_0}" || echo "-")"
+    done
+    echo
+    echo " Installer : ${SCRIPT_NAME} 05 tableau <nom...>   (ou 'auto' = toutes les applications supervisées)"
+    echo " Tableau communautaire grafana.com : ${SCRIPT_NAME} 05 importer <id | fichier.json>"
+}
+
+# Importe un tableau communautaire (grafana.com) ou un fichier JSON exporté
+tableau_importer() {
+    local src="${1:-}" nom f
+    set -- "${1:-}" "${2:-}"
+    [[ -n "${src}" ]] || die "Usage : ${SCRIPT_NAME} 05 importer <id grafana.com | fichier.json>"
+    f="$(workdir)/import.json"
+    if [[ -f "${src}" ]]; then
+        cp "${src}" "${f}"; nom="$(basename "${src}" .json)"
+        [[ "${src}" == /tmp/pb-import.json ]] && { nom="${2:-fichier}"; rm -f "${src}"; }
+    elif [[ "${src}" =~ ^[0-9]+$ ]]; then
+        [[ "${OFFLINE}" == yes ]] && die "Hors-ligne : télécharger le JSON depuis grafana.com puis l'importer comme fichier"
+        download "https://grafana.com/api/dashboards/${src}/revisions/latest/download" "${f}" \
+            || die "Téléchargement impossible du tableau ${src} depuis grafana.com"
+        nom="grafana-${src}"
+    else
+        die "Source invalide : ${src}"
+    fi
+    grep -q '"panels"' "${f}" || die "Le fichier n'est pas un tableau de bord Grafana"
+    # Toutes les sources de données déclarées pointent vers le Prometheus du bundle
+    sed -E -i 's/\$\{DS_[A-Za-z0-9_]+\}/prometheus-bundle/g' "${f}"
+    install -d -m 0755 -o grafana -g "$(grafana_groupe)" "${GRAFANA_DASH_DIR}"
+    ecrire_fichier "${GRAFANA_DASH_DIR}/import-${nom}.json" "grafana:$(grafana_groupe)" 0644 < "${f}"
+    log_ok "Tableau importé : import-${nom}.json (dossier Supervision, visible sous une minute)"
+}
+
+grafana_configurer_base() {
     install -d -m 0755 "${GRAFANA_PROV_DIR}/datasources" "${GRAFANA_PROV_DIR}/dashboards"
-    install -d -m 0755 -o grafana -g grafana "${GRAFANA_DASH_DIR}"
-    ecrire_fichier "${GRAFANA_PROV_DIR}/datasources/prometheus-bundle.yml" root:grafana 0640 <<EOF
+    install -d -m 0755 -o grafana -g "$(grafana_groupe)" "${GRAFANA_DASH_DIR}"
+    ecrire_fichier "${GRAFANA_PROV_DIR}/datasources/prometheus-bundle.yml" "root:$(grafana_groupe)" 0640 <<EOF
 # ${MARQUEUR}
 apiVersion: 1
 datasources:
@@ -3357,7 +3770,7 @@ datasources:
     jsonData:
       timeInterval: ${PROMETHEUS_SCRAPE_INTERVAL}
 EOF
-    ecrire_fichier "${GRAFANA_PROV_DIR}/dashboards/prometheus-bundle.yml" root:grafana 0640 <<EOF
+    ecrire_fichier "${GRAFANA_PROV_DIR}/dashboards/prometheus-bundle.yml" "root:$(grafana_groupe)" 0640 <<EOF
 # ${MARQUEUR}
 apiVersion: 1
 providers:
@@ -3370,9 +3783,106 @@ providers:
     options:
       path: ${GRAFANA_DASH_DIR}
 EOF
-    tableau_de_bord_json | ecrire_fichier "${GRAFANA_DASH_DIR}/vue-ensemble.json" grafana:grafana 0644
-    log_ok "Source de données et tableau de bord « Supervision — Vue d'ensemble » provisionnés"
-    [[ "${1:-}" == tableau ]] && return 0
+    tableau_de_bord_json | ecrire_fichier "${GRAFANA_DASH_DIR}/vue-ensemble.json" "grafana:$(grafana_groupe)" 0644 || exit 1
+    log_ok "Source de données (${GRAFANA_PROMETHEUS_URL}) et tableau « Vue d'ensemble » provisionnés"
+}
+
+# Détermine l'URL de Prometheus quand Grafana est sur une autre machine
+grafana_url_prometheus() {
+    if ! prometheus_installe && [[ "${GRAFANA_PROMETHEUS_URL}" =~ ://(127\.0\.0\.1|localhost)[:/] ]]; then
+        if interactif; then
+            local u; read -r -p "Prometheus n'est pas sur cette machine. URL de Prometheus (ex. http://supervision01:9090) : " u
+            [[ -n "${u}" ]] || die "URL de Prometheus requise"
+            GRAFANA_PROMETHEUS_URL="${u%/}"
+            confirm "Enregistrer cette URL dans le script (GRAFANA_PROMETHEUS_URL) ?" && definir_parametre GRAFANA_PROMETHEUS_URL "${GRAFANA_PROMETHEUS_URL}"
+        else
+            die "Prometheus n'est pas sur cette machine : définir GRAFANA_PROMETHEUS_URL=http://<serveur>:9090"
+        fi
+    fi
+    if url_ok "${GRAFANA_PROMETHEUS_URL}/-/ready"; then
+        log_ok "Prometheus joignable : ${GRAFANA_PROMETHEUS_URL}"
+    else
+        log_warn "Prometheus injoignable depuis cette machine (${GRAFANA_PROMETHEUS_URL}) : vérifier le pare-feu du port ${PROMETHEUS_PORT}"
+    fi
+}
+
+etape_05() {
+    local action="${1:-installer}"
+    [[ "${action}" == aide || "${action}" == -h || "${action}" == --help ]] && { cat <<EOF
+05 — Grafana et tableaux de bord
+  ${SCRIPT_NAME} 05                         installe et configure Grafana (+ propose les tableaux par application)
+  ${SCRIPT_NAME} 05 --sans-installation     Grafana déjà présent : configure seulement
+  ${SCRIPT_NAME} 05 tableaux                tableaux disponibles, installés, et applications détectées
+  ${SCRIPT_NAME} 05 tableau <nom...|auto>   installe des tableaux par application (auto = selon les applications supervisées)
+  ${SCRIPT_NAME} 05 retirer <nom>           retire un tableau
+  ${SCRIPT_NAME} 05 actualiser              régénère tous les tableaux installés (après un changement de seuil)
+  ${SCRIPT_NAME} 05 importer <id|fichier>   importe un tableau communautaire grafana.com ou un export JSON
+  ${SCRIPT_NAME} 05 distant <user@machine>  installe/pilote Grafana sur une AUTRE machine (via SSH)
+
+Grafana sur une autre machine :
+  - depuis le serveur Prometheus : ${SCRIPT_NAME} 05 distant admin@grafana01
+    (mémorise la machine : toutes les commandes « 05 ... » suivantes y sont exécutées)
+  - ou directement sur la machine Grafana :
+    GRAFANA_PROMETHEUS_URL=http://supervision01:9090 ${SCRIPT_NAME} 05
+Machine Grafana actuelle : ${GRAFANA_HOTE_DISTANT:-cette machine}
+EOF
+        return 0; }
+
+    # « 05 distant <machine> » : mémorise la machine puis y installe Grafana
+    if [[ "${action}" == distant ]]; then
+        [[ -n "${2:-}" ]] || die "Usage : ${SCRIPT_NAME} 05 distant <utilisateur@machine>  (ou 'local' pour revenir à cette machine)"
+        require_root
+        if [[ "$2" == local ]]; then definir_parametre GRAFANA_HOTE_DISTANT ""; return 0; fi
+        definir_parametre GRAFANA_HOTE_DISTANT "$2"
+        shift 2; set -- "${@:-installer}"; action="$1"
+    fi
+    # Grafana sur une autre machine : la commande y est relayée
+    if [[ -n "${GRAFANA_HOTE_DISTANT}" && "${PB_GRAFANA_LOCAL:-non}" != oui ]]; then
+        grafana_distant "$@"; return $?
+    fi
+
+    case "${action}" in
+    tableaux) tableaux_lister; return 0 ;;
+    tableau)
+        require_root; shift
+        [[ -d /usr/share/grafana ]] || die "Grafana n'est pas installé sur cette machine (étape 05)"
+        local liste=("$@")
+        if [[ ${#liste[@]} -eq 0 ]]; then
+            tableaux_lister
+            interactif || return 0
+            local r; read -r -p "Tableaux à installer (noms séparés par des espaces, ou 'auto') : " r
+            read -ra liste <<<"${r}"
+        fi
+        if [[ "${liste[*]}" == auto ]]; then mapfile -t liste < <(tableaux_detectes); fi
+        (( ${#liste[@]} > 0 )) || { log_warn "Aucun tableau sélectionné (aucune application détectée ?)"; return 0; }
+        local tb; for tb in "${liste[@]}"; do tableau_installer "$(tableau_de_app "${tb}")"; done
+        return 0 ;;
+    retirer)
+        require_root
+        [[ -n "${2:-}" ]] || die "Usage : ${SCRIPT_NAME} 05 retirer <nom>"
+        rm -f "${GRAFANA_DASH_DIR}/app-$(tableau_de_app "$2").json" "${GRAFANA_DASH_DIR}/import-$2.json"
+        log_ok "Tableau $2 retiré (disparaît de Grafana sous une minute)"; return 0 ;;
+    actualiser)
+        require_root
+        grafana_configurer_base
+        local tb; for tb in $(tableaux_installes); do tableau_installer "${tb}"; done
+        return 0 ;;
+    importer) require_root; tableau_importer "${2:-}" "${3:-}"; return $? ;;
+    installer|--sans-installation) ;;
+    *) die "Action inconnue : ${action} (voir : ${SCRIPT_NAME} 05 aide)" ;;
+    esac
+
+    require_root
+    titre "05 - Grafana"
+    if [[ ! -d /usr/share/grafana ]]; then
+        [[ "${action}" != --sans-installation ]] || die "Grafana n'est pas installé"
+        grafana_installer_paquet || die "Installation de Grafana impossible"
+        log_ok "Grafana installé"
+    else
+        log_info "Grafana déjà présent : configuration uniquement"
+    fi
+    grafana_url_prometheus
+    grafana_configurer_base
 
     install -d -m 0755 "${SYSTEMD_DIR}/grafana-server.service.d"
     ecrire_fichier "${SYSTEMD_DIR}/grafana-server.service.d/prometheus-bundle.conf" root:root 0644 <<EOF
@@ -3390,7 +3900,7 @@ EOF
     systemctl restart grafana-server
     ouvrir_port "${GRAFANA_PORT}" grafana
     attendre_http "http://127.0.0.1:${GRAFANA_PORT}/api/health" 90 || die "Grafana ne démarre pas : journalctl -u grafana-server"
-    log_ok "Grafana prêt : http://$(nom_hote):${GRAFANA_PORT}"
+    log_ok "Grafana prêt : http://$(hostname -f 2>/dev/null || nom_hote):${GRAFANA_PORT}"
 
     # Mot de passe administrateur (premier démarrage : admin/admin)
     local mdp_fichier=/root/grafana-admin.txt mdp="${GRAFANA_ADMIN_PASSWORD}"
@@ -3399,9 +3909,20 @@ EOF
         -d "{\"oldPassword\":\"admin\",\"newPassword\":\"${mdp}\",\"confirmNew\":\"${mdp}\"}" \
         "http://127.0.0.1:${GRAFANA_PORT}/api/user/password" >/dev/null 2>&1; then
         ( umask 077; printf 'Grafana http://%s:%s\nutilisateur : admin\nmot de passe : %s\n' "$(nom_hote)" "${GRAFANA_PORT}" "${mdp}" > "${mdp_fichier}" )
-        log_ok "Mot de passe admin défini : voir ${mdp_fichier}"
+        log_ok "Mot de passe admin défini : voir ${mdp_fichier} (sur $(nom_hote))"
     else
         log_info "Mot de passe admin déjà personnalisé (inchangé)"
+    fi
+
+    # Tableaux par application
+    local det; det="$(tableaux_detectes | tr '\n' ' ')"
+    if [[ -n "${det// /}" ]]; then
+        log_info "Applications supervisées détectées : ${det}"
+        if confirm "Installer les tableaux de bord dédiés à ces applications ?"; then
+            local tb; for tb in ${det}; do tableau_installer "${tb}"; done
+        else
+            log_info "Plus tard : ${SCRIPT_NAME} 05 tableau auto"
+        fi
     fi
 }
 
@@ -3557,6 +4078,206 @@ EOF
 }
 
 # =============================================================================
+#  08 — TEST D'ALERTE PAR APPLICATION
+# =============================================================================
+
+# Règles d'une application, une par ligne : nom<TAB>sévérité<TAB>délai<TAB>expr<TAB>résumé<TAB>description
+regles_tsv() {
+    regles_generer "$1" | awk -v q="'" '
+        function sortir() { if (nom != "") printf "%s\t%s\t%s\t%s\t%s\t%s\n", nom, sev, delai, expr, res, desc }
+        /^ *- alert:/   { sortir(); nom=$3; sev=""; delai="immédiat"; expr=""; res=""; desc="" }
+        /^ *expr:/      { sub("^ *expr: " q, ""); sub(q "$", ""); expr=$0 }
+        /^ *for:/       { delai=$2 }
+        /severity:/     { match($0, /severity: [a-z]+/); sev=substr($0, RSTART+10, RLENGTH-10) }
+        /^ *summary:/   { sub(/^ *summary: "/, ""); sub(/"$/, ""); res=$0 }
+        /^ *description:/ { sub(/^ *description: "/, ""); sub(/"$/, ""); desc=$0 }
+        END { sortir() }'
+}
+
+# Métriques utilisées par une expression PromQL
+metriques_expr() {
+    sed -E 's/"[^"]*"//g; s/\{[^}]*\}//g; s/\[[^]]*\]//g;
+            s/(by|without|on|ignoring|group_left|group_right) *\([^)]*\)//g' <<<"$1" \
+        | grep -oE '[a-zA-Z_:][a-zA-Z0-9_:]*' \
+        | grep -vxE 'by|without|on|ignoring|group_left|group_right|and|or|unless|offset|bool|sum|avg|min|max|count|topk|bottomk|stddev|quantile|rate|irate|increase|delta|idelta|changes|resets|deriv|predict_linear|abs|ceil|floor|round|clamp|clamp_max|clamp_min|scalar|vector|time|timestamp|absent|absent_over_time|label_replace|label_join|histogram_quantile|sort|sort_desc|(avg|min|max|sum|count|last|present|stddev|quantile)_over_time|e|inf|nan|humanize|printf' \
+        | grep -E '_|^up$' | sort -u
+}
+
+# Valeurs d'exemple pour remplir les messages simulés
+remplir_message() {
+    local m="$1" app="$2" inst="$3"
+    m="$(sed -E 's/\{\{ \$value[^}]*\}\}/42/g' <<<"${m}")"
+    m="${m//\{\{ \$labels.instance \}\}/${inst}}"
+    m="${m//\{\{ \$labels.job \}\}/${app}}"
+    m="$(sed -E 's/\{\{ \$labels\.mountpoint \}\}/\/var/g; s/\{\{ \$labels\.device \}\}/sda/g;
+                 s/\{\{ \$labels\.(name|groupname|server) \}\}/exemple/g; s/\{\{ \$labels\.datname \}\}/base_app/g;
+                 s/\{\{ \$labels\.pool \}\}/www/g; s/\{\{ \$labels\.proxy \}\}/backend_web/g;
+                 s/\{\{ \$labels\.topic \}\}/commandes/g; s/\{\{ \$labels\.consumergroup \}\}/facturation/g;
+                 s/\{\{ \$labels\.volume \}\}/C:/g; s/\{\{ \$labels\.([a-z_]+) \}\}/\1-exemple/g' <<<"${m}")"
+    printf '%s' "${m//\\\"/\"}"
+}
+
+# Canaux qui recevront une alerte de cette sévérité
+canaux_pour() {
+    local sev="$1" f noms=""
+    for f in "${ALERTMANAGER_CONF_DIR}"/canaux.d/*.yml; do
+        [[ -f "${f}" ]] || continue
+        [[ "|$(awk -F': ' '/^# severites:/ {print $2}' "${f}")|" == *"|${sev}|"* ]] && noms+="$(basename "${f}" .yml) "
+    done
+    echo "${noms% }"
+}
+
+etape_08() {
+    local app="" choix="" inst="" duree="5m" envoi=yes verif=yes
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --instance) inst="${2:-}"; shift ;;
+            --duree) duree="${2:-5m}"; shift ;;
+            --sans-envoi) envoi=no ;;
+            --sans-verification) verif=no ;;
+            aide|-h|--help) cat <<EOF
+08 — Test d'alerte par application
+  ${SCRIPT_NAME} 08 [application] [alerte|toutes|critiques] [options]
+    application    clé du catalogue (linux, mysql, http...) ou 'base' ; menu si absente
+    alerte         nom d'une règle, 'toutes', ou 'critiques' (défaut : choix dans un menu,
+                   ou la première règle critique en mode non interactif)
+    --instance X   instance simulée (défaut : première cible déclarée de l'application)
+    --duree 5m     durée de l'alerte simulée ; à la fin, le message « RÉSOLU » est envoyé
+    --sans-envoi   vérification des règles uniquement
+    --sans-verification  envoi uniquement
+
+Le test se fait en deux temps :
+  1. Vérification : pour chaque règle, les métriques utilisées existent-elles dans Prometheus
+     pour cette application ? (une règle dont la métrique manque ne se déclenchera jamais)
+  2. Envoi : une alerte simulée, identique à la vraie (nom, gravité, message), libellée test="oui",
+     part vers les canaux qui acceptent sa gravité.
+Exemples :
+  ${SCRIPT_NAME} 08 mysql
+  ${SCRIPT_NAME} 08 linux HoteDisqueCritique --instance web01:9100
+  ${SCRIPT_NAME} 08 redis critiques --duree 2m
+EOF
+                return 0 ;;
+            *) if [[ -z "${app}" ]]; then app="$1"; elif [[ -z "${choix}" ]]; then choix="$1"; else die "Argument inattendu : $1"; fi ;;
+        esac; shift
+    done
+    alertmanager_installe || die "À lancer sur le serveur Prometheus / Alertmanager"
+
+    if [[ -z "${app}" ]]; then
+        interactif || die "Préciser l'application : ${SCRIPT_NAME} 08 <application>"
+        local actives; actives="$(applications_actives | tr '\n' ' ')"
+        echo "Applications supervisées : ${actives:-aucune}"
+        menu_applications; app="${MENU_APP}"
+    fi
+    local fichier jobre
+    if [[ "${app}" == base ]]; then
+        fichier=base; jobre="prometheus|alertmanager"
+    else
+        catalogue "${app}" || die "Application inconnue : ${app}"
+        fichier="${APP_REGLES}"; jobre="${app}"
+        [[ "${app}" == application ]] && jobre="application.*"
+    fi
+    [[ -z "${inst}" && -f "${PROMETHEUS_CONF_DIR}/targets/${app}.yml" ]] && \
+        inst="$(grep -m1 -- '- targets:' "${PROMETHEUS_CONF_DIR}/targets/${app}.yml" | sed 's/.*\["\(.*\)"\].*/\1/')"
+    inst="${inst:-test-${app}}"
+
+    local -a lignes
+    mapfile -t lignes < <(regles_tsv "${fichier}")
+    # Pour les sondes, ne garder que les règles du type choisi
+    if [[ "${fichier}" == sondes ]]; then
+        local -a filtre=(); local l
+        for l in "${lignes[@]}"; do
+            [[ "${l}" == *"job=\"${app}\""* || "${l}" != *'job="'* ]] && filtre+=("${l}")
+        done
+        lignes=("${filtre[@]}")
+    fi
+    (( ${#lignes[@]} > 0 )) || die "Aucune règle pour ${app}"
+    titre "08 - Test des alertes : ${app} (${#lignes[@]} règles, instance ${inst})"
+
+    # --- 1. Vérification des métriques ---------------------------------------
+    if [[ "${verif}" == yes ]]; then
+        if prometheus_installe && url_ok "$(prom_url)/-/ready"; then
+            local nb_cibles; nb_cibles="$(requete "count(up{job=~\"${jobre}\"}) or vector(0)")"
+            [[ "${app}" == base ]] || log_info "Cibles ${app} collectées : ${nb_cibles:-0}"
+            printf '\n   %-36s %-9s %-10s %s\n' "Règle" "Gravité" "Délai" "Vérification"
+            local l nom sev delai expr m manquantes etat actives_n ok=0 ko=0 en_cours=0
+            for l in "${lignes[@]}"; do
+                IFS=$'\t' read -r nom sev delai expr _ _ <<<"${l}"
+                manquantes=""
+                for m in $(metriques_expr "${expr}"); do
+                    [[ "${m}" == up ]] && continue
+                    [[ "$(requete "count(${m}{job=~\"${jobre}\"}) or vector(0)")" =~ ^0?$ ]] && manquantes+="${m} "
+                done
+                actives_n="$(requete "count(ALERTS{alertname=\"${nom}\",alertstate=\"firing\"}) or vector(0)")"
+                if [[ -n "${manquantes}" ]]; then
+                    etat="${C_Y}métrique absente : ${manquantes% }${C_0}"; ko=$((ko + 1))
+                else
+                    etat="${C_G}opérationnelle${C_0}"; ok=$((ok + 1))
+                fi
+                [[ "${actives_n}" =~ ^[1-9] ]] && { etat+=" ${C_R}— EN COURS (${actives_n})${C_0}"; en_cours=1; }
+                printf '   %-36s %-9s %-10s %s\n' "${nom}" "${sev}" "${delai}" "${etat}"
+            done
+            echo
+            log_info "${ok} règle(s) opérationnelle(s), ${ko} dont une métrique est absente"
+            (( ko > 0 && en_cours )) && log_warn "Une alerte est en cours : si l'application est arrêtée, son agent n'expose plus ses autres métriques (normal)"
+            (( ko > 0 )) && log_info "Métrique absente : application non déclarée, agent sans accès, fonctionnalité non utilisée (ex. réplication) ou version d'agent différente"
+        else
+            log_warn "Prometheus non joignable ici : vérification des métriques ignorée"
+        fi
+    fi
+    [[ "${envoi}" == yes ]] || return 0
+
+    # --- 2. Choix des alertes à simuler --------------------------------------
+    local -a envoyer=()
+    case "${choix}" in
+        toutes) envoyer=("${lignes[@]}") ;;
+        critiques) local l; for l in "${lignes[@]}"; do [[ "$(cut -f2 <<<"${l}")" == critical ]] && envoyer+=("${l}"); done ;;
+        "")
+            if interactif; then
+                local i=1 l; echo "Alerte à simuler :"
+                for l in "${lignes[@]}"; do printf '  %2d) %-36s %s\n' "${i}" "$(cut -f1 <<<"${l}")" "$(cut -f2 <<<"${l}")"; i=$((i + 1)); done
+                local r; read -r -p "Numéro (Entrée = première critique, 't' = toutes) : " r
+                if [[ "${r}" == t ]]; then envoyer=("${lignes[@]}")
+                elif [[ "${r}" =~ ^[0-9]+$ ]] && (( r >= 1 && r <= ${#lignes[@]} )); then envoyer=("${lignes[$((r - 1))]}"); fi
+            fi
+            if (( ${#envoyer[@]} == 0 )); then
+                local l; for l in "${lignes[@]}"; do [[ "$(cut -f2 <<<"${l}")" == critical ]] && { envoyer=("${l}"); break; }; done
+                (( ${#envoyer[@]} )) || envoyer=("${lignes[0]}")
+            fi ;;
+        *) local l; for l in "${lignes[@]}"; do [[ "$(cut -f1 <<<"${l}")" == "${choix}" ]] && envoyer=("${l}"); done
+           (( ${#envoyer[@]} )) || die "Règle inconnue pour ${app} : ${choix} (voir : ${SCRIPT_NAME} 02 regles ${app})" ;;
+    esac
+
+    # --- 3. Envoi ----------------------------------------------------------------
+    titre "Envoi des alertes simulées (durée ${duree})"
+    local fin s; s="${duree%[smh]}"
+    case "${duree}" in *h) s=$((s * 3600)) ;; *m) s=$((s * 60)) ;; esac
+    fin="$(date -u -d "+${s} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    local l nom sev res desc cat canaux envoyees=0
+    for l in "${envoyer[@]}"; do
+        IFS=$'\t' read -r nom sev _ _ res desc <<<"${l}"
+        cat="$(regles_generer "${fichier}" | awk -v n="${nom}" '$0 ~ "- alert: "n"$" {t=1} t && /categorie:/ {match($0, /categorie: [a-z-]+/); print substr($0, RSTART+11, RLENGTH-11); exit}')"
+        canaux="$(canaux_pour "${sev}")"
+        if "${BIN_DIR}/amtool" alert add "${nom}" severity="${sev}" categorie="${cat:-test}" job="${app}" instance="${inst}" test="oui" \
+            --annotation=summary="[TEST] $(remplir_message "${res}" "${app}" "${inst}")" \
+            --annotation=description="$(remplir_message "${desc}" "${app}" "${inst}") — Alerte simulée par ${SCRIPT_NAME} 08, aucune action requise." \
+            ${fin:+--end="${fin}"} --alertmanager.url="$(am_url)" >/dev/null 2>&1; then
+            envoyees=$((envoyees + 1))
+            if [[ -n "${canaux}" ]]; then
+                log_ok "${nom} (${sev}) → ${canaux}"
+            else
+                log_warn "${nom} (${sev}) → aucun canal n'accepte la gravité '${sev}' (visible seulement dans Alertmanager)"
+            fi
+        else
+            log_error "Envoi impossible : ${nom}"
+        fi
+    done
+    echo
+    log_info "${envoyees} alerte(s) simulée(s) envoyée(s) : réception sous ${ALERT_GROUP_WAIT}, message « RÉSOLU » après ${duree}"
+    log_info "Les alertes simulées portent le libellé test=\"oui\" et le préfixe [TEST]."
+    log_info "Faire taire un test en cours : ${SCRIPT_NAME} 06 silence 'test=\"oui\"' ${duree} \"fin de test\""
+}
+
+# =============================================================================
 #  99 — NETTOYAGE
 # =============================================================================
 etape_99() {
@@ -3635,6 +4356,7 @@ EOF
     rm -f /etc/cron.d/prometheus-bundle
 
     titre "Grafana"
+    [[ -n "${GRAFANA_HOTE_DISTANT}" ]] && log_info "Grafana est sur ${GRAFANA_HOTE_DISTANT} : y lancer « ${SCRIPT_NAME} 99 » pour le nettoyer"
     rm -f "${GRAFANA_PROV_DIR}/datasources/prometheus-bundle.yml" "${GRAFANA_PROV_DIR}/dashboards/prometheus-bundle.yml"
     rm -rf "${GRAFANA_DASH_DIR}" "${SYSTEMD_DIR}/grafana-server.service.d/prometheus-bundle.conf"
     if [[ "${grafana}" == yes ]]; then
@@ -3681,9 +4403,10 @@ ${C_GRAS}=== PROMETHEUS-BUNDLE — supervision applicative ===${C_0}
   02  Configuration (paramètres, seuils, règles)
   03  Agents et applications
   04  Canaux d'alerte (Slack, Teams, Telegram, e-mail, SMS...)
-  05  Grafana + tableau de bord
+  05  Grafana + tableaux de bord (local ou autre machine)
   06  Exploitation (état, alertes, maintenance)
   07  Sauvegarde / restauration
+  08  Test des alertes d'une application
   99  Nettoyage
   q   Quitter
 EOF
@@ -3702,6 +4425,7 @@ EOF
                 [[ -n "${a}" ]] && eval "etape_06 ${a}" ;;
             07) etape_07 aide; read -r -p "Action (sauvegarder | liste | restaurer | planifier) : " a
                 [[ -n "${a}" ]] && eval "etape_07 ${a}" ;;
+            08) etape_08 ;;
             99) etape_99 ;;
             q|Q|"") return 0 ;;
             *) log_warn "Choix inconnu : ${c}" ;;
@@ -3718,12 +4442,13 @@ main() {
         02|configuration) etape_02 "$@" ;;
         03|agents)        [[ "${1:-}" =~ ^(agent|cible|retirer|deployer|desinstaller)$ ]] && init_log 03_agents; etape_03 "$@" ;;
         04|alerting)      [[ "${1:-}" =~ ^(ajouter|supprimer)$ ]] && init_log 04_alerting; etape_04 "$@" ;;
-        05|grafana)       init_log 05_grafana; etape_05 "$@" ;;
+        05|grafana)       [[ "${1:-}" =~ ^(aide|-h|--help|tableaux)$ ]] || init_log 05_grafana; etape_05 "$@" ;;
         06|exploitation)  etape_06 "$@" ;;
         07|sauvegarde)    etape_07 "$@" ;;
+        08|test)          [[ "${1:-}" =~ ^(aide|-h|--help)$ ]] || init_log 08_test; etape_08 "$@" ;;
         99|nettoyage)     init_log 99_nettoyage; etape_99 "$@" ;;
-        "")               if [[ -t 0 ]]; then menu; else sed -n '3,26p' "${SCRIPT_PATH}" | sed 's/^# \{0,2\}//'; fi ;;
-        -h|--help|aide)   sed -n '3,26p' "${SCRIPT_PATH}" | sed 's/^# \{0,2\}//' ;;
+        "")               if [[ -t 0 ]]; then menu; else sed -n '3,27p' "${SCRIPT_PATH}" | sed 's/^# \{0,2\}//'; fi ;;
+        -h|--help|aide)   sed -n '3,27p' "${SCRIPT_PATH}" | sed 's/^# \{0,2\}//' ;;
         *) die "Étape inconnue : ${etape} (voir : ${SCRIPT_NAME} aide)" ;;
     esac
 }
