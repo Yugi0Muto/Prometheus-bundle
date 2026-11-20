@@ -1,0 +1,3 @@
+# Archives de release : à déposer localement, pas à versionner
+packages/*.tar.gz
+packages/*sha256sums.txt

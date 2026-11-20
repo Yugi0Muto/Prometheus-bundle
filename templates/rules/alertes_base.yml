@@ -1,0 +1,61 @@
+# =============================================================================
+#  Règles d'alerte de base - Prometheus-bundle
+#  Validation : promtool check rules /etc/prometheus/rules/alertes_base.yml
+# =============================================================================
+groups:
+  - name: supervision-de-base
+    rules:
+      - alert: CibleInjoignable
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cible {{ $labels.instance }} injoignable"
+          description: "Le job {{ $labels.job }} ne parvient plus à collecter {{ $labels.instance }} depuis 2 minutes."
+
+      - alert: PrometheusEchecRechargementConfig
+        expr: prometheus_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Échec du rechargement de la configuration Prometheus"
+          description: "Le dernier rechargement de configuration de {{ $labels.instance }} a échoué."
+
+      - alert: PrometheusEchecEnvoiAlertmanager
+        expr: rate(prometheus_notifications_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus n'arrive pas à notifier Alertmanager"
+          description: "Erreurs d'envoi de notifications depuis {{ $labels.instance }}."
+
+      - alert: AlertmanagerEchecRechargementConfig
+        expr: alertmanager_config_last_reload_successful == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Échec du rechargement de la configuration Alertmanager"
+          description: "Le dernier rechargement de configuration de {{ $labels.instance }} a échoué."
+
+      - alert: AlertmanagerEchecNotifications
+        expr: rate(alertmanager_notifications_failed_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Alertmanager n'arrive pas à envoyer des notifications"
+          description: "L'intégration {{ $labels.integration }} échoue sur {{ $labels.instance }}."
+
+  - name: watchdog
+    rules:
+      # Alerte toujours active : permet de vérifier que la chaîne d'alerte fonctionne
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+        annotations:
+          summary: "Alerte de contrôle de la chaîne d'alerte (toujours active)"
