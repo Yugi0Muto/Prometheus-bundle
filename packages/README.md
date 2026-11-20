@@ -1,16 +1,20 @@
-# packages/ — archives pour installation hors-ligne
+# packages/ — installation hors-ligne
 
-Déposez ici les archives officielles (même architecture que la cible) :
+Si un fichier attendu est présent ici, `prometheus-bundle.sh` l'utilise au lieu de le télécharger.
+Avec `OFFLINE=yes`, aucun accès Internet n'est tenté.
 
-```
-prometheus-<version>.linux-<arch>.tar.gz
-alertmanager-<version>.linux-<arch>.tar.gz
-prometheus-sha256sums.txt      # = sha256sums.txt de la release Prometheus, renommé
-alertmanager-sha256sums.txt    # = sha256sums.txt de la release Alertmanager, renommé
-```
+Déposer les fichiers **sous leur nom d'origine** (architecture du serveur cible, ex. `linux-amd64`) :
 
-Sources : https://github.com/prometheus/prometheus/releases et
-https://github.com/prometheus/alertmanager/releases
+| Composant | Fichier | Sommes de contrôle |
+|---|---|---|
+| Prometheus | `prometheus-<v>.linux-amd64.tar.gz` | `sha256sums.txt` de la release |
+| Alertmanager | `alertmanager-<v>.linux-amd64.tar.gz` | `sha256sums.txt` de la release |
+| Agents | `node_exporter-<v>.linux-amd64.tar.gz`, `mysqld_exporter-...`, etc. | idem |
+| Agent Java | `jmx_prometheus_javaagent-<v>.jar` | `jmx_prometheus_javaagent-<v>.jar.sha256` |
+| Grafana | `grafana_<v>_amd64.deb` ou `grafana-<v>.x86_64.rpm` | — |
 
-Si une archive est présente ici, elle est utilisée en priorité ; sinon elle est
-téléchargée (sauf si `OFFLINE=yes`).
+Plusieurs projets publient tous un fichier nommé `sha256sums.txt` : en mode hors-ligne, les fusionner en un seul
+`sha256sums.txt` (`cat */sha256sums.txt > sha256sums.txt`), ou désactiver la vérification avec `VERIFY_CHECKSUM=no`.
+
+Les versions et URL exactes sont en tête de `prometheus-bundle.sh` (section CONFIGURATION) et visibles avec :
+`./prometheus-bundle.sh 02 afficher`.

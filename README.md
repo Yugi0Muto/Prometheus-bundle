@@ -1,96 +1,75 @@
 # Prometheus-bundle
 
-Bundle d'installation et de configuration de **Prometheus** et **Alertmanager**
-sur un serveur Linux avec systemd (RHEL/Rocky/Alma, Debian/Ubuntu…).
+Supervision applicative clé en main : **Prometheus + Alertmanager + agents par application + Grafana**,
+pilotée par **un seul script autonome** (`prometheus-bundle.sh`) dont toute la configuration est en tête de fichier.
 
-| Script | Rôle |
+![Tableau de bord Supervision — Vue d'ensemble](docs/apercu-tableau-de-bord.png)
+
+## En bref
+
+| Étape | Commande | Rôle |
+|---|---|---|
+| 00 | `sudo ./prometheus-bundle.sh 00` | Vérification préliminaire (ne modifie rien) |
+| 01 | `sudo ./prometheus-bundle.sh 01` | Installation de Prometheus 3.16 et Alertmanager 0.35 (+ agent Linux local) |
+| 02 | `./prometheus-bundle.sh 02 afficher` | Paramètres et seuils ; `02 definir SEUIL_DISQUE_WARN 75` réécrit le script et applique |
+| 03 | `sudo ./prometheus-bundle.sh 03 catalogue` | Agents et applications : installation locale, déploiement SSH, déclaration des cibles |
+| 04 | `sudo ./prometheus-bundle.sh 04 ajouter` | Canaux d'alerte : Teams, Slack, Telegram, e-mail, SMS, PagerDuty, Jira... |
+| 05 | `sudo ./prometheus-bundle.sh 05` | Grafana en français + tableau de bord « Supervision — Vue d'ensemble » |
+| 06 | `./prometheus-bundle.sh 06 etat` | Exploitation : état, alertes, maintenance (silences), journaux |
+| 07 | `sudo ./prometheus-bundle.sh 07 sauvegarder` | Sauvegarde, restauration, planification quotidienne |
+| 99 | `sudo ./prometheus-bundle.sh 99` | Nettoyage complet d'une installation précédente |
+
+Sans argument, le script ouvre un menu interactif. Aide d'une étape : `./prometheus-bundle.sh 03 aide`.
+
+## Applications supervisées (22)
+
+| Famille | Applications |
 |---|---|
-| `00_verification_prealable.sh` | Vérifie que la machine est prête. Ne modifie rien. |
-| `01_installation.sh` | Installe, configure, démarre et contrôle les deux services. |
-| `99_nettoyage.sh` | Supprime une installation précédente (services, binaires, config, données, comptes, pare-feu). |
+| Système | Linux, Windows |
+| Disponibilité | Sites et API web (code HTTP, temps de réponse, certificat TLS), ports TCP, ping |
+| Bases de données | MySQL/MariaDB, PostgreSQL, Redis, MongoDB, Memcached, Elasticsearch/OpenSearch |
+| Serveurs web | Nginx, Apache, PHP-FPM, HAProxy |
+| Messagerie | RabbitMQ, Kafka |
+| Applications | Java/JVM (Tomcat, WildFly...), Spring Boot, processus, conteneurs Docker, application instrumentée |
 
-## Utilisation rapide
+Chaque application apporte ses **règles d'alerte dédiées** : **132 règles** au total, en français, avec seuils réglables.
+Liste complète : [docs/REGLES_ALERTE.md](docs/REGLES_ALERTE.md).
 
-```bash
-sudo ./00_verification_prealable.sh
-```
+## Canaux d'alerte (14)
 
-```bash
-sudo ./01_installation.sh
-```
+E-mail, Slack, Microsoft Teams, Telegram, Discord, Mattermost, Rocket.Chat, Webex, PagerDuty, Opsgenie, Pushover,
+SMS (Amazon SNS), Jira, webhook générique. Plusieurs canaux en parallèle, chacun avec son filtre de gravité
+(ex. Teams pour tout, SMS pour le critique).
 
-Pour repartir de zéro :
-
-```bash
-sudo ./99_nettoyage.sh --backup
-```
-
-Toute la configuration se trouve dans `config/bundle.conf`. Chaque variable peut
-aussi être passée par l'environnement :
+## Exemple de mise en place
 
 ```bash
-sudo PROMETHEUS_PORT=9091 ALERTMANAGER_RECEIVER_TYPE=email ALERTMANAGER_EMAIL_TO=ops@exemple.fr ./01_installation.sh
+sudo ./prometheus-bundle.sh 01
 ```
-
-## Arborescence
-
-```
-config/bundle.conf              Versions, chemins, ports, comptes, récepteur d'alertes
-lib/common.sh                   Fonctions communes (journalisation, détection, gabarits)
-templates/prometheus.yml.tpl    Configuration Prometheus
-templates/alertmanager-*.yml.tpl Configuration Alertmanager (webhook ou email)
-templates/rules/*.yml           Règles d'alerte copiées dans /etc/prometheus/rules/
-templates/systemd/*.service.tpl Unités systemd (avec durcissement)
-packages/                       Archives pour installation hors-ligne
-```
-
-Les gabarits utilisent la syntaxe `@@VARIABLE@@`, remplacée par la valeur de la
-variable de `bundle.conf`.
-
-## 00 — Vérification préliminaire
-
-Contrôles : droits root, Linux + systemd, architecture, commandes requises,
-mémoire, espace disque, disponibilité des ports, installation existante,
-présence ou téléchargeabilité des archives, état SELinux et pare-feu.
-Code retour `0` si prêt (avertissements possibles), `1` en cas d'erreur.
-Il est relancé automatiquement par `01_installation.sh`.
-
-## 01 — Installation
-
-1. Vérifications préliminaires (`--skip-checks` pour les ignorer)
-2. Récupération des archives (`packages/` sinon GitHub) et **vérification SHA256**
-3. Création des comptes système `prometheus` et `alertmanager` (sans shell)
-4. Création de l'arborescence (`/etc/…`, `/var/lib/…`)
-5. Installation des binaires `prometheus`, `promtool`, `alertmanager`, `amtool`
-6. Déploiement des configurations, validées par `promtool` et `amtool`
-7. Unités systemd, restauration SELinux, activation au démarrage
-8. Ouverture du pare-feu si `OPEN_FIREWALL=yes` (firewalld ou ufw)
-9. Démarrage puis contrôle de santé sur `/-/ready`
-
-Options : `--force` (mise à jour : écrase binaires et configurations après
-sauvegarde `.bak.<date>`), `--skip-checks`, `--no-start`.
-
-Sans `--force`, le script refuse d'écraser une installation existante et ne
-remplace jamais une configuration déjà présente.
-
-## 99 — Nettoyage
-
-Demande confirmation puis supprime : services et unités systemd, binaires,
-configurations, données, règles de pare-feu et comptes système.
-
-Options : `-y/--yes` (non interactif), `--backup` (archive dans
-`/var/backups/prometheus-bundle/`), `--keep-data`, `--keep-config`, `--keep-users`.
-
-## Installation hors-ligne
-
-Déposez les archives et les fichiers de sommes dans `packages/` (voir
-`packages/README.md`), puis :
 
 ```bash
-sudo OFFLINE=yes ./01_installation.sh
+sudo ./prometheus-bundle.sh 03 deployer mysql admin@bdd01 env=prod
 ```
 
-## Journaux
+```bash
+sudo ./prometheus-bundle.sh 03 cible http https://www.exemple.fr env=prod
+```
 
-Chaque exécution écrit un journal horodaté dans `/var/log/prometheus-bundle/`.
-Les services se consultent avec `journalctl -u prometheus -u alertmanager`.
+```bash
+sudo ./prometheus-bundle.sh 04 ajouter teams equipe-exploitation
+```
+
+```bash
+sudo ./prometheus-bundle.sh 05
+```
+
+## Documentation
+
+- [Guide d'exploitation](docs/GUIDE_EXPLOITATION.md) : mise en service, ajout d'applications, alerting, réaction aux alertes, maintenance, sauvegarde, mises à jour, dépannage.
+- [Règles d'alerte](docs/REGLES_ALERTE.md) : les 132 règles, application par application.
+- [packages/](packages/README.md) : installation hors-ligne.
+
+## Prérequis
+
+Linux avec systemd (Debian/Ubuntu, RHEL/Rocky/Alma), droits root, `curl` ou `wget`, accès à github.com
+(ou archives dans `packages/`). L'agent Windows et cAdvisor s'installent hors du script (consignes fournies).
